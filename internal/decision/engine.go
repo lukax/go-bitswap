@@ -178,6 +178,8 @@ type Engine struct {
 	metricUpdateCounter int
 
 	taskComparator TaskComparator
+
+	peerBlockRequestFilter PeerBlockRequestFilter
 }
 
 // TaskInfo represents the details of a request from a peer.
@@ -199,11 +201,21 @@ type TaskInfo struct {
 // It should return true if task 'ta' has higher priority than task 'tb'
 type TaskComparator func(ta, tb *TaskInfo) bool
 
+// PeerBlockRequestFilter is used to accept / deny requests for a CID coming from a PeerID
+// It should return true if the request should be fullfilled.
+type PeerBlockRequestFilter func(p peer.ID, c cid.Cid) bool
+
 type Option func(*Engine)
 
 func WithTaskComparator(comparator TaskComparator) Option {
 	return func(e *Engine) {
 		e.taskComparator = comparator
+	}
+}
+
+func WithPeerBlockRequestFilter(pbrf PeerBlockRequestFilter) Option {
+	return func(e *Engine) {
+		e.peerBlockRequestFilter = pbrf
 	}
 }
 
@@ -591,6 +603,8 @@ func (e *Engine) MessageReceived(ctx context.Context, p peer.ID, m bsmsg.BitSwap
 
 	// Get block sizes
 	wants, cancels := e.splitWantsCancels(entries)
+	wants, denials := e.splitWantsDenials(p, wants)
+
 	wantKs := cid.NewSet()
 	for _, entry := range wants {
 		wantKs.Add(entry.Cid)
@@ -627,6 +641,33 @@ func (e *Engine) MessageReceived(ctx context.Context, p peer.ID, m bsmsg.BitSwap
 		log.Debugw("Bitswap engine <- cancel", "local", e.self, "from", p, "cid", entry.Cid)
 		if l.CancelWant(entry.Cid) {
 			e.peerRequestQueue.Remove(entry.Cid, p)
+		}
+	}
+
+	// Deny access to blocks
+	for _, entry := range denials {
+		log.Debugw("Bitswap engine: block denied access", "local", e.self, "from", p, "cid", entry.Cid, "sendDontHave", entry.SendDontHave)
+		// sendDontHave(entry)
+		// Only add the task to the queue if the requester wants a DONT_HAVE
+		c := entry.Cid
+		if e.sendDontHaves && entry.SendDontHave {
+			newWorkExists = true
+			isWantBlock := false
+			if entry.WantType == pb.Message_Wantlist_Block {
+				isWantBlock = true
+			}
+
+			activeEntries = append(activeEntries, peertask.Task{
+				Topic:    c,
+				Priority: int(entry.Priority),
+				Work:     bsmsg.BlockPresenceSize(c),
+				Data: &taskData{
+					BlockSize:    0,
+					HaveBlock:    false,
+					IsWantBlock:  isWantBlock,
+					SendDontHave: entry.SendDontHave,
+				},
+			})
 		}
 	}
 
@@ -711,6 +752,26 @@ func (e *Engine) splitWantsCancels(es []bsmsg.Entry) ([]bsmsg.Entry, []bsmsg.Ent
 		}
 	}
 	return wants, cancels
+}
+
+// Split the want-have / want-block entries from the block that will be denied access
+func (e *Engine) splitWantsDenials(p peer.ID, allWants []bsmsg.Entry) ([]bsmsg.Entry, []bsmsg.Entry) {
+	if e.peerBlockRequestFilter == nil {
+		return allWants, nil
+	}
+
+	wants := make([]bsmsg.Entry, 0, len(allWants))
+	denied := make([]bsmsg.Entry, 0, len(allWants))
+
+	for _, et := range allWants {
+		if e.peerBlockRequestFilter(p, et.Cid) {
+			wants = append(wants, et)
+		} else {
+			denied = append(denied, et)
+		}
+	}
+
+	return wants, denied
 }
 
 // ReceiveFrom is called when new blocks are received and added to the block

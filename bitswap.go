@@ -148,8 +148,15 @@ func SetSimulateDontHavesOnTimeout(send bool) Option {
 	}
 }
 
+func WithPeerBlockRequestFilter(pbrf PeerBlockRequestFilter) Option {
+	return func(bs *Bitswap) {
+		bs.peerBlockRequestFilter = pbrf
+	}
+}
+
 type TaskInfo = decision.TaskInfo
 type TaskComparator = decision.TaskComparator
+type PeerBlockRequestFilter = decision.PeerBlockRequestFilter
 
 // WithTaskComparator configures custom task prioritization logic.
 func WithTaskComparator(comparator TaskComparator) Option {
@@ -283,6 +290,7 @@ func New(parent context.Context, network bsnet.BitSwapNetwork,
 		pendingBlocksGauge,
 		activeBlocksGauge,
 		decision.WithTaskComparator(bs.taskComparator),
+		decision.WithPeerBlockRequestFilter(bs.peerBlockRequestFilter),
 	)
 	bs.engine.SetSendDontHaves(bs.engineSetSendDontHaves)
 
@@ -388,6 +396,9 @@ type Bitswap struct {
 	simulateDontHavesOnTimeout bool
 
 	taskComparator TaskComparator
+
+	// an optional feature to accept / deny requests for blocks
+	peerBlockRequestFilter PeerBlockRequestFilter
 }
 
 type counters struct {
